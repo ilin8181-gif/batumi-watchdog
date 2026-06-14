@@ -1,0 +1,35 @@
+name: watchdog
+
+# Облачный сторож batumi-expert.ru — крутится в GitHub Actions 24/7,
+# независимо от того, включён ли Mac. Алерт в Telegram только на смену статуса.
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # каждые ~10 мин (GitHub может задерживать на неск. минут)
+  workflow_dispatch:          # ручной запуск кнопкой
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # rolling-state: восстанавливаем последнее состояние, чтобы алертить
+      # только на СМЕНУ статуса (лёг/поднялся), а не каждый прогон.
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: watchdog-state-${{ github.run_id }}
+          restore-keys: |
+            watchdog-state-
+
+      - name: Run watchdog
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+        run: python3 watchdog_ci.py
