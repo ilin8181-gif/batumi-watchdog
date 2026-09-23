@@ -1,11 +1,12 @@
 name: watchdog
 
-# Облачный сторож batumi-expert.ru — крутится в GitHub Actions 24/7,
-# независимо от того, включён ли Mac. Алерт в Telegram только на смену статуса.
+# Cloud website watchdog — runs in GitHub Actions 24/7,
+# independent of whether any local machine is on.
+# Telegram alert fires only on a status change (down / back up).
 on:
   schedule:
-    - cron: "*/30 * * * *"   # каждые 30 мин — укладывается в бесплатные 2000 мин/мес приватного репо (GitHub может задерживать на неск. минут)
-  workflow_dispatch:          # ручной запуск кнопкой
+    - cron: "*/30 * * * *"   # every 30 min — fits the free 2000 min/mo quota (GitHub may delay by a few minutes)
+  workflow_dispatch:          # manual run via the Actions tab
 
 concurrency:
   group: watchdog
@@ -18,8 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rolling-state: восстанавливаем последнее состояние, чтобы алертить
-      # только на СМЕНУ статуса (лёг/поднялся), а не каждый прогон.
+      # rolling state: restore the last state so we alert only on a
+      # status *change* (down / back up), not on every run.
       - name: Restore state
         uses: actions/cache@v4
         with:

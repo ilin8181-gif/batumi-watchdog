@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Облачный сторож batumi-expert.ru для GitHub Actions (stdlib only).
+"""Cloud website watchdog for GitHub Actions (stdlib only).
 
-Самодостаточная версия seo_machine/watchdog.py: без зависимостей от seo_machine,
-секреты из env (TG_TOKEN, TG_CHAT). Крутится в GitHub Actions 24/7 независимо от Mac,
-шлёт в Telegram только на СМЕНУ статуса (лёг/поднялся).
+Self-contained, dependency-free monitor. Secrets come from env
+(TG_TOKEN, TG_CHAT); the monitored site comes from WATCHDOG_SITE
+(default: https://batumi-expert.ru). Runs in GitHub Actions 24/7
+independently of any local machine and messages Telegram only on a
+status *change* (down / back up).
 
-Три слоя (HTTP 200 недостаточно — WP fatal под кэшем отдаёт 200 с телом «критическая
-ошибка»): код + тело (есть </html>, нет маркеров краха, размер не обвалился) +
-индексируемость (noindex не просочился, robots не Disallow:/, sitemap-дрейф).
+Three layers of checks (HTTP 200 alone is not enough — a cached
+WordPress fatal error still returns 200 with a "critical error" body):
+status code + body (has </html>, no crash markers, size not collapsed),
+indexability (no leaked noindex, robots not Disallow:/, sitemap drift).
 
-State (для «алерт только на смену») хранится в state/watchdog_state.json и переживает
-запуски через actions/cache. Кэш-мисс = максимум один лишний алерт — не критично.
+State (for "alert only on change") lives in state/watchdog_state.json
+and survives runs via actions/cache. A cache miss costs at most one
+duplicate alert — not critical.
 """
 import gzip
 import json
@@ -20,7 +24,8 @@ import time
 import urllib.error
 import urllib.request
 
-SITE = "https://batumi-expert.ru"
+SITE = (os.environ.get("WATCHDOG_SITE") or "https://batumi-expert.ru").rstrip("/")
+SITE_HOST = SITE.split("//", 1)[-1]
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "watchdog_state.json")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -158,7 +163,8 @@ def main():
         if not ok:
             fails.append(f"{p} — {reason}")
 
-    # защита от ложняков: всё недоступно по сети → проверь внешний референс
+    # false-positive guard: if everything is unreachable by network,
+    # probe an external reference — if it fails too, it's not the site's fault
     if all(r[2].startswith("нет ответа") for r in results):
         if fetch(EXTERNAL_REF, timeout=15)[0] == 0:
             print("Внешняя сеть недоступна — пропуск (не вина сайта).")
@@ -179,11 +185,11 @@ def main():
         state["sitemap_count"] = sm_count
 
     if now_status == "down" and prev == "ok":
-        tg_send("🔴 batumi-expert.ru ЛЁГ (облачный сторож)\n"
+        tg_send(f"🔴 {SITE_HOST} ЛЁГ (облачный сторож)\n"
                 + "\n".join(f"• {f}" for f in fails))
         state["since"] = now
     elif now_status == "ok" and prev == "down":
-        tg_send(f"✅ batumi-expert.ru ПОДНЯЛСЯ (лежал ~{human_dur(now - state.get('since', now))})")
+        tg_send(f"✅ {SITE_HOST} ПОДНЯЛСЯ (лежал ~{human_dur(now - state.get('since', now))})")
         state["since"] = now
 
     state["status"] = now_status
