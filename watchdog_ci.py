@@ -154,6 +154,31 @@ def human_dur(sec):
     return f"{sec // 86400} дн {sec % 86400 // 3600} ч"
 
 
+def confirm_down(fails, attempts=2, pause=40):
+    """Перепроверка перед алертом.
+
+    Инцидент 2026-10-02 16:31 UTC: единственный прогон из 8 показал
+    "нет </html>" на трёх страницах ровно в момент пересборки кэша.
+    Сайт был жив — сбой длился меньше минуты, а владелец получил
+    тревогу "САЙТ ЛЁГ". Скрипт gzip распаковывает корректно, винова
+    была кратковременная (транзиентная) поломка.
+
+    Отсюда правило: алерт шлём только после подтверждения. Если при
+    повторной проверке сайт ожил — молчим, а факт фиксируем в state.
+
+    Возвращает (итоговый список падений, подтверждено_ли_падение).
+    """
+    last = fails
+    for i in range(attempts):
+        time.sleep(pause)
+        retry = [(p,) + check_page(p) for p in CRITICAL_PATHS]
+        still = ["%s — %s" % (p, r) for p, ok, r in retry if not ok]
+        if not still:
+            return [], False          # ожил — тревога не нужна
+        last = still
+    return last, True
+
+
 def main():
     state = load_state()
     fails = []
@@ -185,9 +210,21 @@ def main():
         state["sitemap_count"] = sm_count
 
     if now_status == "down" and prev == "ok":
-        tg_send(f"🔴 {SITE_HOST} ЛЁГ (облачный сторож)\n"
-                + "\n".join(f"• {f}" for f in fails))
-        state["since"] = now
+        # Не кричим сразу: подтверждаем падение повторной проверкой.
+        original_fails = list(fails)
+        fails, confirmed = confirm_down(fails)
+        if not confirmed:
+            state["last_transient"] = {
+                "at": time.time(),
+                "was": original_fails,
+                "note": "сайт ожил при перепроверке, алерт не отправлен",
+            }
+            print("⚠️  Транзиентный сбой: при перепроверке сайт жив, алерт НЕ отправлен")
+            now_status = "ok"
+        else:
+            tg_send(f"🔴 {SITE_HOST} ЛЁГ (облачный сторож)\n"
+                    + "\n".join(f"• {f}" for f in fails))
+            state["since"] = now
     elif now_status == "ok" and prev == "down":
         tg_send(f"✅ {SITE_HOST} ПОДНЯЛСЯ (лежал ~{human_dur(now - state.get('since', now))})")
         state["since"] = now
