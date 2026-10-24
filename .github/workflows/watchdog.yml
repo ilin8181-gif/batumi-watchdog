@@ -5,7 +5,7 @@ name: watchdog
 # Telegram alert fires only on a status change (down / back up).
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 min — fits the free 2000 min/mo quota (GitHub may delay by a few minutes)
+    - cron: "7,37 * * * *"   # EXPERIMENT 2026-10-24: shifted off :00/:30 (GitHub load). Baseline tag cron-baseline-30min; revert = git revert this commit
   workflow_dispatch:          # manual run via the Actions tab
 
 concurrency:
