@@ -5,7 +5,7 @@
 
 **Zero-dependency website watchdog that runs on GitHub Actions — free, 24/7, and independent of your machine.**
 
-It checks your site every 30 minutes on **three layers** and pings Telegram **only when the status actually changes** (down / back up):
+It is scheduled every 30 minutes (GitHub throttles scheduled runs: measured 2026-10-05..24, median gap 4.7 h, max 9.6 h) and checks your site on **three layers** and pings Telegram **only when the status actually changes** (down / back up):
 
 1. **Availability** — HTTP status code *and* body sanity: `</html>` present, no crash markers, size hasn't collapsed;
 2. **Indexability** — no leaked `noindex` meta tag, `robots.txt` not `Disallow: /`;

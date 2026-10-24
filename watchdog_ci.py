@@ -154,7 +154,31 @@ def human_dur(sec):
     return f"{sec // 86400} дн {sec % 86400 // 3600} ч"
 
 
-def confirm_down(fails, attempts=2, pause=40):
+SITEMAP_WINDOW = 14 * 24 * 3600   # O2: база sitemap = максимум за 14 дней
+
+
+def sitemap_baseline(state, now):
+    """O2: база для сравнения — максимум за окно, а не прошлый прогон.
+
+    Раньше sitemap_count перезаписывался каждым прогоном, и плавное
+    падение (100→80→64→…) ни разу не давало разницы ≥30%.
+    """
+    hist = [(t, c) for t, c in state.get("sitemap_hist", [])
+            if now - t <= SITEMAP_WINDOW]
+    if hist:
+        return max(c for _, c in hist)
+    return state.get("sitemap_count", 0)
+
+
+def remember_sitemap(state, now, count):
+    hist = [(t, c) for t, c in state.get("sitemap_hist", [])
+            if now - t <= SITEMAP_WINDOW]
+    hist.append((now, count))
+    state["sitemap_hist"] = [list(x) for x in hist]
+    state["sitemap_count"] = count      # совместимость со старым state
+
+
+def confirm_down(fails, attempts=2, pause=40, recheck=None):
     """Перепроверка перед алертом.
 
     Инцидент 2026-10-02 16:31 UTC: единственный прогон из 8 показал
@@ -171,8 +195,13 @@ def confirm_down(fails, attempts=2, pause=40):
     last = fails
     for i in range(attempts):
         time.sleep(pause)
-        retry = [(p,) + check_page(p) for p in CRITICAL_PATHS]
-        still = ["%s — %s" % (p, r) for p, ok, r in retry if not ok]
+        if recheck is not None:
+            # O1: перепроверяем ВСЕ упавшие слои (страницы + robots + sitemap),
+            # иначе падение только robots/sitemap «оживало» и алерт глушился.
+            still = recheck()
+        else:
+            retry = [(p,) + check_page(p) for p in CRITICAL_PATHS]
+            still = ["%s — %s" % (p, r) for p, ok, r in retry if not ok]
         if not still:
             return [], False          # ожил — тревога не нужна
         last = still
@@ -199,20 +228,32 @@ def main():
     if not rob_ok:
         fails.append(f"robots — {rob_reason}")
 
-    sm_ok, sm_reason, sm_count = check_sitemap(state.get("sitemap_count", 0))
+    now = time.time()
+    baseline = sitemap_baseline(state, now)
+    sm_ok, sm_reason, sm_count = check_sitemap(baseline)
     if not sm_ok:
         fails.append(f"sitemap — {sm_reason}")
 
     now_status = "down" if fails else "ok"
     prev = state.get("status", "ok")
-    now = time.time()
     if sm_count:
-        state["sitemap_count"] = sm_count
+        remember_sitemap(state, now, sm_count)
+
+    def recheck():
+        still = ["%s — %s" % (p, r) for p, ok, r in
+                 [(p,) + check_page(p) for p in CRITICAL_PATHS] if not ok]
+        r_ok, r_why = check_robots()
+        if not r_ok:
+            still.append(f"robots — {r_why}")
+        s_ok, s_why, _ = check_sitemap(baseline)
+        if not s_ok:
+            still.append(f"sitemap — {s_why}")
+        return still
 
     if now_status == "down" and prev == "ok":
         # Не кричим сразу: подтверждаем падение повторной проверкой.
         original_fails = list(fails)
-        fails, confirmed = confirm_down(fails)
+        fails, confirmed = confirm_down(fails, recheck=recheck)
         if not confirmed:
             state["last_transient"] = {
                 "at": time.time(),
