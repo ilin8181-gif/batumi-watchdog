@@ -36,23 +36,34 @@ def run_case(name, fail_attempts, expect_confirmed):
     return ok
 
 
-print("=== Тест confirm_down (считаем ПОПЫТКИ, не вызовы) ===")
-print(f"  страниц в CRITICAL_PATHS: {len(REAL_PATHS)}")
-a = run_case("A) падение устойчивое", fail_attempts=99, expect_confirmed=True)
-b = run_case("B) упал и сразу ожил", fail_attempts=1, expect_confirmed=False)
-c = run_case("C) падает обе попытки", fail_attempts=2, expect_confirmed=True)
+def test_confirm_down_scenarios():
+    import time
 
-w.check_page = lambda p: (True, "")
-import time
-t0 = time.time()
-d, conf = w.confirm_down(["/ — x"], attempts=2, pause=0.01)
-print(f"  D) сайт здоров на первой же попытке: падений={len(d)}, "
-      f"подтверждено={conf} (ожидалось 0/False) -> "
-      f"{'OK' if (len(d) == 0 and not conf) else 'ПРОВАЛ'}")
-fast = time.time() - t0 < 0.5
-print(f"  D) без лишних пауз: {'OK' if fast else 'МЕДЛЕННО'}")
+    print("=== Тест confirm_down (считаем ПОПЫТКИ, не вызовы) ===")
+    print(f"  страниц в CRITICAL_PATHS: {len(REAL_PATHS)}")
+    a = run_case("A) падение устойчивое", fail_attempts=99, expect_confirmed=True)
+    b = run_case("B) упал и сразу ожил", fail_attempts=1, expect_confirmed=False)
+    c = run_case("C) падает обе попытки", fail_attempts=2, expect_confirmed=True)
 
-w.check_page = lambda p: (False, "нет </html>")  # восстановим контекст
-ok = all([a, b, c]) and len(d) == 0 and not conf and fast
-print("\nИТОГ:", "все сценарии пройдены" if ok else "ЕСТЬ ПРОВАЛЫ")
-sys.exit(0 if ok else 1)
+    w.check_page = lambda p: (True, "")
+    t0 = time.time()
+    d, conf = w.confirm_down(["/ — x"], attempts=2, pause=0.01)
+    print(f"  D) сайт здоров на первой же попытке: падений={len(d)}, "
+          f"подтверждено={conf} (ожидалось 0/False) -> "
+          f"{'OK' if (len(d) == 0 and not conf) else 'ПРОВАЛ'}")
+    fast = time.time() - t0 < 0.5
+    print(f"  D) без лишних пауз: {'OK' if fast else 'МЕДЛЕННО'}")
+
+    w.check_page = lambda p: (False, "нет </html>")  # восстановим контекст
+    ok = all([a, b, c]) and len(d) == 0 and not conf and fast
+    print("\nИТОГ:", "все сценарии пройдены" if ok else "ЕСТЬ ПРОВАЛЫ")
+    assert ok
+    return ok
+
+
+if __name__ == "__main__":
+    try:
+        test_confirm_down_scenarios()
+        sys.exit(0)
+    except AssertionError:
+        sys.exit(1)
