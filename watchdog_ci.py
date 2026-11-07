@@ -20,6 +20,7 @@ import gzip
 import json
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -52,21 +53,80 @@ CRASH_MARKERS = [
 ]
 MIN_BODY = 8000
 EXTERNAL_REF = "https://ya.ru"
+PAGES = CRITICAL_PATHS
+
+DEFAULT_TIMEOUT = 2.5
+ROBOTS_TIMEOUT = 2.5
+SITEMAP_TIMEOUT = 3.5
+TG_TIMEOUT = 4.0
+DEFAULT_RETRIES = 2
+DEFAULT_BACKOFF = 0.5
+MAX_RETRY_AFTER = 5.0
+RECHECK_DELAY = 35
+TRANSIENT_HTTP_CODES = {0, 408, 429, 500, 502, 503, 504}
+
+TG_TOKEN = os.environ.get("TG_TOKEN", "")
+TG_CHAT = os.environ.get("TG_CHAT", "")
+_IN_RECHECK = False
 
 
-def fetch(url, timeout=25):
-    """(status, body:str). status=0 при сетевой ошибке."""
+def _parse_retry_after(headers=None, raw_body=b""):
+    """Извлекает `Retry-After` (сек) из HTTP-заголовков, HTTPError или JSON-ответа Telegram API."""
+    if isinstance(headers, urllib.error.HTTPError):
+        err = headers
+        headers = getattr(err, "headers", None)
+        if not raw_body:
+            try:
+                raw_body = err.read()
+            except Exception:
+                raw_body = b""
+    if headers and hasattr(headers, "get"):
+        val = headers.get("Retry-After") or headers.get("retry-after")
+        if val is not None:
+            try:
+                return max(0.0, float(str(val).strip()))
+            except ValueError:
+                pass
+    if raw_body:
+        try:
+            obj = json.loads(raw_body.decode("utf-8", "replace"))
+            ra = ((obj.get("parameters") or {}).get("retry_after")) if isinstance(obj, dict) else None
+            if ra is not None:
+                return max(0.0, float(ra))
+        except Exception:
+            pass
+    return None
+
+
+def _fetch_once(url, timeout):
+    """Одиночный запрос -> (status, body:str, retry_after:float|None). status=0 при сетевой ошибке/таймауте."""
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read()
             if r.headers.get("Content-Encoding") == "gzip":
                 raw = gzip.decompress(raw)
-            return r.status, raw.decode(r.headers.get_content_charset() or "utf-8", "replace")
+            return r.status, raw.decode(r.headers.get_content_charset() or "utf-8", "replace"), None
     except urllib.error.HTTPError as e:
-        return e.code, ""
+        ra = _parse_retry_after(getattr(e, "headers", None))
+        return e.code, "", ra
     except Exception:
-        return 0, ""
+        return 0, "", None
+
+
+def fetch(url, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES, backoff_base=DEFAULT_BACKOFF):
+    """(status, body:str) с retry, exponential backoff и поддержкой Retry-After (429)."""
+    code, body = 0, ""
+    effective_retries = 0 if (_IN_RECHECK and retries == DEFAULT_RETRIES) else max(0, int(retries))
+    for attempt in range(effective_retries + 1):
+        code, body, retry_after = _fetch_once(url, timeout)
+        if code not in TRANSIENT_HTTP_CODES or attempt == effective_retries:
+            return code, body
+        delay = backoff_base * (2 ** attempt)
+        if code == 429 and retry_after is not None:
+            delay = min(max(delay, retry_after), MAX_RETRY_AFTER)
+        time.sleep(delay)
+    return code, body
 
 
 def check_page(path):
@@ -90,7 +150,7 @@ def check_page(path):
 
 
 def check_robots():
-    code, body = fetch(SITE + "/robots.txt", timeout=20)
+    code, body = fetch(SITE + "/robots.txt", timeout=ROBOTS_TIMEOUT)
     if code != 200:
         return False, f"robots.txt HTTP {code}"
     if re.search(r'(?im)^\s*disallow:\s*/\s*$', body) and \
@@ -100,23 +160,56 @@ def check_robots():
 
 
 def check_sitemap(prev):
-    code, body = fetch(SITE + "/sitemap_index.xml", timeout=20)
+    code, body = fetch(SITE + "/sitemap_index.xml", timeout=SITEMAP_TIMEOUT)
     if code != 200:
         return False, f"sitemap HTTP {code}", prev
+    body_low = body.lower()
+    if "<sitemapindex" in body_low and "</sitemapindex>" not in body_low:
+        return False, "sitemap_index.xml оборван XML", prev
+    child_urls = re.findall(r"<loc>([^<]+)</loc>", body)
+    if not child_urls:
+        return False, "sitemap пуст (нет дочерних sitemap)", prev
     total = 0
-    for sm in re.findall(r"<loc>([^<]+)</loc>", body):
-        c2, b2 = fetch(sm, timeout=20)
-        if c2 == 200:
-            total += len(re.findall(r"<loc>", b2))
+    bad_children = []
+    multi_child = len(child_urls) > 1
+    for sm in child_urls:
+        sm_name = sm.rstrip("/").rsplit("/", 1)[-1] or sm
+        c2, b2 = fetch(sm, timeout=SITEMAP_TIMEOUT)
+        if c2 != 200:
+            label = f"{sm_name} HTTP {c2}" if c2 else f"{sm_name} нет ответа"
+            bad_children.append(label)
+            break
+        b2_low = b2.lower()
+        if "<urlset" in b2_low and "</urlset>" not in b2_low:
+            bad_children.append(f"{sm_name} оборван XML")
+            break
+        if "<urlset" in b2_low or "<url>" in b2_low or "</loc>" in b2_low:
+            open_locs = len(re.findall(r"<loc>", b2_low))
+            close_locs = len(re.findall(r"</loc>", b2_low))
+            open_urls = len(re.findall(r"<url>", b2_low))
+            close_urls = len(re.findall(r"</url>", b2_low))
+            if open_locs != close_locs or open_urls != close_urls:
+                bad_children.append(f"{sm_name} повреждён XML (незакрытые теги)")
+                break
+            cnt = len(re.findall(r"<loc>[^<]+</loc>", b2))
+        else:
+            cnt = len(re.findall(r"<loc>", b2))
+        if multi_child and cnt == 0:
+            bad_children.append(f"{sm_name} пуст (0 URL)")
+            break
+        total += cnt
+    if bad_children:
+        return False, f"недоступен дочерний sitemap ({', '.join(bad_children)})", prev
     if total == 0:
-        return False, "sitemap пуст (0 URL)", 0
+        return False, "sitemap пуст (0 URL)", prev
     if prev and total < prev * 0.7:
         return False, f"sitemap просел {prev}→{total} URL", total
     return True, "", total
 
 
 def tg_send(text):
-    token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")
+    token = os.environ.get("TG_TOKEN") or TG_TOKEN
+    chat = os.environ.get("TG_CHAT") or TG_CHAT
     if not token or not chat:
         print("WARN: TG_TOKEN/TG_CHAT не заданы — алерт не отправлен")
         return
@@ -125,10 +218,35 @@ def tg_send(text):
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
         data=data, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        urllib.request.urlopen(req, timeout=20).read()
-    except Exception as e:
-        print("WARN: Telegram send failed:", str(e)[:120])
+    for attempt in range(DEFAULT_RETRIES + 1):
+        try:
+            urllib.request.urlopen(req, timeout=TG_TIMEOUT).read()
+            return
+        except urllib.error.HTTPError as e:
+            if e.code not in TRANSIENT_HTTP_CODES or attempt == DEFAULT_RETRIES:
+                print("WARN: Telegram send failed:", str(e)[:120])
+                return
+            delay = DEFAULT_BACKOFF * (2 ** attempt)
+            ra = _parse_retry_after(e)
+            if e.code == 429 and ra is not None:
+                delay = min(max(delay, ra), MAX_RETRY_AFTER)
+            time.sleep(delay)
+        except (TimeoutError, socket.timeout) as e:
+            # Read/socket timeout on non-idempotent POST /sendMessage:
+            # Telegram server may have already accepted and delivered the message.
+            # Do NOT retry to prevent duplicate notifications.
+            print("WARN: Telegram send timeout (no retry to avoid duplicate):", str(e)[:120])
+            return
+        except Exception as e:
+            # Check if a wrapped timeout (e.g. URLError(socket.timeout)) occurred
+            reason = getattr(e, "reason", None)
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                print("WARN: Telegram send timeout (no retry to avoid duplicate):", str(e)[:120])
+                return
+            if attempt == DEFAULT_RETRIES:
+                print("WARN: Telegram send failed:", str(e)[:120])
+                return
+            time.sleep(DEFAULT_BACKOFF * (2 ** attempt))
 
 
 def load_state():
@@ -178,7 +296,7 @@ def remember_sitemap(state, now, count):
     state["sitemap_count"] = count      # совместимость со старым state
 
 
-def confirm_down(fails, attempts=2, pause=40, recheck=None):
+def confirm_down(fails, attempts=2, pause=RECHECK_DELAY, recheck=None):
     """Перепроверка перед алертом.
 
     Инцидент 2026-10-02 16:31 UTC: единственный прогон из 8 показал
@@ -192,20 +310,26 @@ def confirm_down(fails, attempts=2, pause=40, recheck=None):
 
     Возвращает (итоговый список падений, подтверждено_ли_падение).
     """
+    global _IN_RECHECK
     last = fails
-    for i in range(attempts):
-        time.sleep(pause)
-        if recheck is not None:
-            # O1: перепроверяем ВСЕ упавшие слои (страницы + robots + sitemap),
-            # иначе падение только robots/sitemap «оживало» и алерт глушился.
-            still = recheck()
-        else:
-            retry = [(p,) + check_page(p) for p in CRITICAL_PATHS]
-            still = ["%s — %s" % (p, r) for p, ok, r in retry if not ok]
-        if not still:
-            return [], False          # ожил — тревога не нужна
-        last = still
-    return last, True
+    prev_flag = _IN_RECHECK
+    _IN_RECHECK = True
+    try:
+        for i in range(attempts):
+            time.sleep(pause)
+            if recheck is not None:
+                # O1: перепроверяем ВСЕ упавшие слои (страницы + robots + sitemap),
+                # иначе падение только robots/sitemap «оживало» и алерт глушился.
+                still = recheck()
+            else:
+                retry = [(p,) + check_page(p) for p in CRITICAL_PATHS]
+                still = ["%s — %s" % (p, r) for p, ok, r in retry if not ok]
+            if not still:
+                return [], False          # ожил — тревога не нужна
+            last = still
+        return last, True
+    finally:
+        _IN_RECHECK = prev_flag
 
 
 def main():
@@ -220,7 +344,7 @@ def main():
     # false-positive guard: if everything is unreachable by network,
     # probe an external reference — if it fails too, it's not the site's fault
     if all(r[2].startswith("нет ответа") for r in results):
-        if fetch(EXTERNAL_REF, timeout=15)[0] == 0:
+        if fetch(EXTERNAL_REF, timeout=DEFAULT_TIMEOUT)[0] == 0:
             print("Внешняя сеть недоступна — пропуск (не вина сайта).")
             return
 
@@ -236,7 +360,7 @@ def main():
 
     now_status = "down" if fails else "ok"
     prev = state.get("status", "ok")
-    if sm_count:
+    if sm_ok and sm_count:
         remember_sitemap(state, now, sm_count)
 
     def recheck():
