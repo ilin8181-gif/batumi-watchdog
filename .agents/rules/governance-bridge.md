@@ -2,19 +2,15 @@
 trigger: always_on
 ---
 
-# Межрепозиторный мост координатора Batumi Expert (`batumi-watchdog` ↔ `governance/state.json`)
+# Актуальный межконтурный регламент (`batumi-watchdog` ↔ `batumi-expert-project`)
 
-Репозиторий `/Users/aleksandrilin/AI-Projects/batumi-watchdog` является контуром эксплуатационного мониторинга (`contour: watchdog`) единого проекта **Batumi Expert**.
-Единый машиночитаемый источник истины (Single Source of Truth) находится в:
-- **База состояния:** `/Users/aleksandrilin/AI-Projects/batumi-expert-project/governance/state.json`
-- **CLI координатора:** `/Users/aleksandrilin/AI-Projects/batumi-expert-project/governance/coordinator.py`
-- **Автосводка:** `/Users/aleksandrilin/AI-Projects/batumi-expert-project/governance/VIEWS-AUTO.md`
+Репозиторий `/Users/aleksandrilin/AI-Projects/batumi-watchdog` является контуром эксплуатационного мониторинга (`contour: watchdog`) боевого домена `batumi-expert.ru` проекта **Batumi Expert**.
 
-## 1. Холодный старт и планирование работ
-При любом вопросе владельца («Что делаем?», «Какой статус мониторинга?») или перед изменением проверок `watchdog.py` первым делом вызови:
-```bash
-python3 /Users/aleksandrilin/AI-Projects/batumi-expert-project/governance/coordinator.py status --contour watchdog
-```
+## 1. Отмена старого координатора (`read-only` архив)
+- Архивный каталог `/Users/aleksandrilin/AI-Projects/batumi-expert-project/governance/` (`coordinator.py`, `state.json`, старые реестры) сохраняется **строго в режиме `read-only` архива**.
+- Обязательный вызов `coordinator.py` и старый 7-шаговый Post-Audit Gate **отменены** — не запускать `coordinator.py` и не записывать находки в `state.json`.
 
-## 2. Обязательный 7-шаговый Post-Audit Gate
-При проведении любого аудита инфраструктуры, SSL/DNS, endpoint-проверок или алертинга все находки регистрируются поштучно (`N = N`) в `/Users/aleksandrilin/AI-Projects/batumi-expert-project/governance/state.json` через `coordinator.py` (`register-audit` → `add-finding` → привязка `TSK`/`DEC` → `scan-overlaps` → сверка полноты → `validate` с `exit code 0` → `status`).
+## 2. Межконтурный read-only контракт и изоляция
+- При вопросе владельца «Что делаем?» или при разборе инцидентов доступности разрешён ограниченный `read-only` доступ для сверки состояния сторожа с оперативной панелью [`/Users/aleksandrilin/AI-Projects/batumi-expert-project/STATUS.md`](/Users/aleksandrilin/AI-Projects/batumi-expert-project/STATUS.md) (а по доменам и контактам — с `FACTS.md`), **без модификации файлов соседнего репозитория** без прямого поручения владельца.
+- Результаты аудитов и проверок фиксируются в локальном отчёте/задаче (и переносятся в `STATUS.md` основного проекта только по прямому поручению владельца).
+- Чужие проекты (`woodroot-batumi`, `woodroot-ads`, `primeera-fitness`) полностью изолированы — обращение к ним запрещено.
